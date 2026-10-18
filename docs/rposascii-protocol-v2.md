@@ -14,6 +14,12 @@ straight up. It talks to rpos over **UART serial** (primary) or
 position or move status and has no relative-in-FOV move, so it cannot support
 Frigate autotracking.
 
+**Firmware developers:** start with
+[ptz-controller-firmware-spec.md](ptz-controller-firmware-spec.md). It is the
+self-contained contract for the controller, with the behavior of every command
+and the conformance tests. This document is the design background and the rpos
+side.
+
 This document has three parts:
 
 1. [The firmware profile](#part-1-the-firmware-profile): the small set of
@@ -66,6 +72,10 @@ oddity, but it keeps v1's line format so a v1 consumer still parses the lines.
   `strtof`, not locale-dependent functions.
 - After the fixed positional fields, a message may carry **optional fields** as
   `key=value` tokens in any order.
+  Each command has a fixed number of positional fields, and what is a positional
+  field is decided by position, not by looking for `=`: a preset name may be empty
+  or contain `=`. Do not split with `strtok`, which drops empty fields. See the
+  firmware specification.
 - **Unknown commands and unknown keys are ignored silently**, in both
   directions. This is what lets the protocol grow, and it is why rpos can send
   extras (`cam=`, `id=`) the firmware doesn't implement.
@@ -213,7 +223,7 @@ Constants the firmware needs (names are suggestions):
 | `STEPS_PER_DEG_PAN`, `STEPS_PER_DEG_TILT` | Steps per degree of pan and tilt (motor steps, microstepping and gear ratio, through the differential) |
 | `PAN_LIMIT_DEG` | Pan limit each side of 0, 180 |
 | `TILT_MIN_DEG`, `TILT_MAX_DEG` | Tilt limits in protocol degrees (0 = straight up), for example -120 and 0, from the measured mechanical stops with a margin |
-| `TILT_INVERT` | Flips the tilt motor direction so that positive tilt pitches the camera up |
+| `PAN_INVERT`, `TILT_INVERT` | Flip a motor direction so that positive pan turns the camera right and positive tilt pitches it up |
 | `HOME_TOLERANCE_DEG`, `PRESET_TOLERANCE_DEG`, `MIN_MOVE_DEG` | Tolerances, see above |
 | `BOOT_PRESET` | Optional. Preset to move to after homing, or none |
 | `HFOV_DEG`, `VFOV_DEG` | Camera field of view (see below) |

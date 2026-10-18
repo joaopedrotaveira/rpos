@@ -20,7 +20,7 @@ full-field sensor modes). See the protocol doc.
 
 | Step | State |
 |---|---|
-| 0. `rposascii` two-way | rpos side done and tested. Firmware side not started |
+| 0. `rposascii` two-way | rpos side done and tested. Firmware side not started; its specification is [ptz-controller-firmware-spec.md](ptz-controller-firmware-spec.md) |
 | 1. Advertise the FOV space | Done. The node lists `TranslationSpaceFov` once the field of view is known (from `caps`, or `PTZHorizontalFOV` / `PTZVerticalFOV`). No zoom spaces without zoom hardware |
 | 2. Fix `RelativeMove` | Done: local values, profile lookup, `space` and `Speed` passed through, ONVIF faults |
 | 3. Position and move status | Done for `rposascii`: `GetStatus` position and `MoveStatus`, capabilities from `caps`, estimate fallback |
