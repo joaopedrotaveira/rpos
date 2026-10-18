@@ -350,7 +350,7 @@ class MediaService extends SoapService {
             attributes: { token: userProfile.token, fixed: false },
             VideoSourceConfiguration: (userProfile.videoSourceConfigurationToken != '' ? videoSourceConfigurationsArray.find(item => item.attributes.token == userProfile.videoSourceConfigurationToken) : undefined),
             VideoEncoderConfiguration: (userProfile.videoEncoderConfigurationToken != '' ? videoEncoderConfigurationsArray.find(item => item.attributes.token == userProfile.videoEncoderConfigurationToken) : undefined),
-            PTZConfiguration: (userProfile.videoEncoderConfigurationToken != '' ? this.ptz_service.ptzConfigurationsArray.find(item => item.attributes.token == userProfile.ptzConfigurationToken) : undefined)
+            PTZConfiguration: (userProfile.ptzConfigurationToken != '' ? this.ptz_service.ptzConfigurationsArray.find(item => item.attributes.token == userProfile.ptzConfigurationToken) : undefined)
           }
           utils.log.info("Adding User Defined ONVIF Profile " + userProfile.name);
           _profilesArray.push(newItem);

@@ -24,6 +24,12 @@ interface rposConfig {
   PTZOutputURL: string;
   PTZCameraAddress: number;
   PTZNumPresets: number;
+  PTZStatusMode?: string;         // rposascii: auto, controller, estimate or off
+  PTZStatusMaxAgeMs?: number;     // rposascii: age up to which a cached status is used
+  PTZRequestTimeoutMs?: number;   // rposascii: how long to wait for the controller to reply
+  PTZEstimateMsPerUnit?: number;  // rposascii: estimated time for a move of 1.0 (normalised)
+  PTZHorizontalFOV?: number;      // degrees, used if the controller does not report it
+  PTZVerticalFOV?: number;
   DeviceInformation: DeviceInformation;
   logLevel: number;
   logSoapCalls: Boolean;
@@ -176,3 +182,12 @@ type ImagingArrayItem = {
   focusNearLimit: number,
   focusFarLimit: number
 };
+
+interface PTZStatusInfo {
+  pan?: number;        // -1..1, only when the position is real
+  tilt?: number;
+  zoom?: number;
+  panTilt: 'IDLE' | 'MOVING' | 'UNKNOWN';
+  error?: string;
+  estimated: boolean;  // true when rpos made the status up from its own commands
+}

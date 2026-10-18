@@ -1,0 +1,31 @@
+{
+  "NetworkAdapters" : ["awdl0","eth0", "wlan0", "en0"], 
+  "IpAddress" : "192.168.1.15",
+  "ServicePort" : 8081,
+  "Username" : "",
+  "Password" : "",
+  "CameraType" : "picam",
+  "RTSPAddress" : "", "//":"Normally left blank. Used to set RTSP Server Address",
+  "RTSPPort" : 8554,
+  "RTSPName" : "h264",
+  "MulticastEnabled"  : false,
+  "RTSPMulticastName" : "h264m",
+  "MulticastAddress"  : "224.0.0.1",
+  "MulticastPort"     : "10001",
+  "RTSPServer" : 1, "RtspServerComment" : "## Select RTSP Server > 1:RPOS RTSP Server 2:V4L2 RTSP Server by mpromonet (auto selected if MulticastEnabled=true)",
+  "PTZDriver" : "rposascii", "PTZDriverComment": "## rposascii v2 talks to a PTZ controller such as an ESP32. See docs/rposascii-protocol-v2.md",
+  "PTZOutput" : "serial", "PTZOutputComment": "## serial (UART or USB serial) or tcp (set PTZOutputURL to the controller, e.g. 192.168.1.50:9999)",
+  "PTZSerialPort" : "/dev/ttyACM0",
+  "PTZSerialPortSettings" : { "baudRate":115200, "dataBits":8, "parity":"none", "stopBits":1 },
+  "PTZOutputURL": "127.0.0.1:9999",
+  "PTZCameraAddress": 1,
+  "PTZStatusMode": "auto", "PTZStatusModeComment": "## auto: use the controller's status if it reports one, else estimate. Also controller, estimate, off",
+  "PTZHorizontalFOV": 66, "PTZVerticalFOV": 41, "PTZFOVComment": "## degrees. Only used if the controller does not report its field of view. Camera Module 3 standard lens, measure yours",
+  "DeviceInformation" : {
+    "Manufacturer" : "Raspberry Pi",
+    "Model" : "2 B",
+    "HardwareId" : ""
+  },
+  "logLevel" : 3, "logLevelComment": "## LogLevels are > 1:Error 2:Warning 3:Info 4:Debug",
+  "logSoapCalls" : false
+}

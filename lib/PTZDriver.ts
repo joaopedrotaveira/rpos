@@ -6,6 +6,7 @@ import net = require('net');
 import dgram = require('dgram');
 import { setImmediate } from "timers";
 import events = require("events");
+import { RposAsciiClient, MotionEstimator, PAN_SCALE_DEG, TILT_SCALE_DEG } from "./RposAscii";
 
 /*
 PTZDriver for RPOS (Raspberry Pi ONVIF Server)
@@ -71,12 +72,35 @@ RPOS ASCII Output Format
    aux            auxname
    relayactive    relayname
    relayinactive  relayname
-   ptz            panspeed   tiltspeed   zoomspeed
-   absolute-ptz   panspeed   tiltspeed   zoomspeed
-   releative-ptz  panspeed   tiltspeed   zoomspeed
+   ptz            panvelocity   tiltvelocity   zoomvelocity
+   absolute-ptz   panposition   tiltposition   zoomposition
+   relative-ptz   pantranslation   tilttranslation   zoomtranslation
    brightness     value
    focus          direction
    focusstop
+
+  Protocol v2 (see docs/rposascii-protocol-v2.md) is two-way.
+  Every line above may end with key=value fields. rpos adds cam=N (the camera
+  address) to PTZ, preset and home lines. absolute-ptz and relative-ptz may carry
+  panspeed= and tiltspeed= (0 to 1) and relative-ptz carries space=fov|generic.
+  rpos also sends
+   stop
+   getcaps
+   getstatus
+   getpresets
+  and reads the replies
+   caps      proto=2 abs=1 rel=1 cont=1 zoom=0 home=1 presets=64 movestatus=1 position=1 fixedhome=1 hfov= vfov= panrange=min,max tiltrange=min,max
+   status    pan= tilt= zoom= pantilt=IDLE|MOVING|UNKNOWN homed=0|1 athome=0|1 atpreset=N error=text
+   presets   used=1,3,7
+  A controller that never replies still works: rpos then assumes v1 behaviour
+  and estimates the move status and position (PTZStatusMode).
+
+  Extra config settings (all optional)
+      PTZStatusMode: "auto"      auto, controller, estimate or off
+      PTZStatusMaxAgeMs: 500     age up to which a cached status is used
+      PTZRequestTimeoutMs: 300   how long to wait for the controller to reply
+      PTZEstimateMsPerUnit: 1500 estimated time for a move of 1.0 (normalised)
+      PTZHorizontalFOV / PTZVerticalFOV  degrees, used if caps has no hfov/vfov
 
 
 PTZOutput
@@ -122,15 +146,16 @@ class ReconnectingStream extends events.EventEmitter {
 
     this.stream = new net.Socket();
     
-    this.stream.on('connect', function() {
+    this.stream.on('connect', () => {
       console.log('PTZ Driver - Socket connected');
+      this.emit('connect');
     })
     this.stream.on('data', (data) => {  
-        console.log('PTZ Driver received socket data ' + data);
-        // TODO - emit the data
+        this.emit('data', data);
     });
     this.stream.on('close', () => {
       console.log('PTZ Driver - Socket closed');
+      this.emit('close');
       // schedule a reconnect in 1 second (TODO - add backoff strategy)
       setTimeout(() => {this.reconnect()}, 1000); // use => to make timeout function bind to this instance
     });
@@ -175,12 +200,12 @@ class UDPStream extends events.EventEmitter {
 
     this.socket = dgram.createSocket('udp4');
     
-    this.socket.on('listening', function() {
+    this.socket.on('listening', () => {
       console.log('PTZ Driver - UDP Socket ready');
+      this.emit('connect');
     })
     this.socket.on('message', (data) => {  
-        console.log('PTZ Driver received socket data ' + data);
-        // TODO - emit the message
+        this.emit('message', data);
     });
     this.socket.on('close', () => {
       console.log('PTZ Driver - UDP Socket closed');
@@ -222,7 +247,14 @@ class PTZDriver {
   supportsContinuousPTZ: boolean = false;
   supportsGoToHome: boolean = false;
   hasFixedHomePosition: boolean = true;
+  hasZoom: boolean = true;
   numPresets: number = 255;
+
+  // rposascii v2. 'capabilities' is emitted when the controller sends caps and
+  // 'presets' (string[]) when it lists the presets it has stored.
+  events: events.EventEmitter = new events.EventEmitter();
+  rposClient: RposAsciiClient = null;
+  estimator: MotionEstimator = null;
 
   constructor(config: rposConfig) {
 
@@ -243,6 +275,22 @@ class PTZDriver {
     }
 
 
+    if (config.PTZDriver === 'rposascii') {
+      this.estimator = new MotionEstimator(Number(config.PTZEstimateMsPerUnit) || 1500);
+      this.rposClient = new RposAsciiClient((line: string) => {
+        try {
+          this.stream.write(line);
+        } catch (err) {
+          // no stream open, or the write failed. Requests have timeouts, so drop it.
+        }
+      }, {
+        statusMaxAgeMs: config.PTZStatusMaxAgeMs,
+        requestTimeoutMs: config.PTZRequestTimeoutMs
+      });
+      this.rposClient.on('caps', (caps) => this.applyCaps(caps));
+      this.rposClient.on('presets', (tokens) => this.events.emit('presets', tokens));
+    }
+
     // Open the OUTPUT STREAM
     if (PTZOutput === 'serial') {
       const { SerialPort } = require('serialport');
@@ -254,8 +302,17 @@ class PTZDriver {
         stopBits: config.PTZSerialPortSettings.stopBits,
       });
 
-      this.serialPort.on("open", function(){
+      this.serialPort.on("open", () => {
           console.log('Serial port opened');
+          if (this.rposClient) this.rposClient.connected();
+      });
+
+      this.serialPort.on("data", (data) => {
+          if (this.rposClient) this.rposClient.handleData(data);
+      });
+
+      this.serialPort.on("close", () => {
+          if (this.rposClient) this.rposClient.disconnected();
       });
 
       this.serialPort.on("error", function(err: Error){
@@ -270,8 +327,15 @@ class PTZDriver {
       let port = config.PTZOutputURL.split(':')[1];      
 
       this.stream = new ReconnectingStream();
-      this.stream.on('data', function(data) {  
-          console.log('PTZ Driver received socket data ' + data);
+      this.stream.on('data', (data) => {
+          if (this.rposClient) this.rposClient.handleData(data);
+          else console.log('PTZ Driver received socket data ' + data);
+      });
+      this.stream.on('connect', () => {
+          if (this.rposClient) this.rposClient.connected();
+      });
+      this.stream.on('close', () => {
+          if (this.rposClient) this.rposClient.disconnected();
       });
 
       console.log('PTZ Driver connecting to ' + host + ':' + port);
@@ -284,8 +348,12 @@ class PTZDriver {
       let port = config.PTZOutputURL.split(':')[1];      
 
       this.stream = new UDPStream();
-      this.stream.on('message', function(data) {  // USES MESSAGE (tcp uses 'data')
-          console.log('PTZ Driver received UDP socket data ' + data);
+      this.stream.on('message', (data) => {  // USES MESSAGE (tcp uses 'data')
+          if (this.rposClient) this.rposClient.handleDatagram(data);
+          else console.log('PTZ Driver received UDP socket data ' + data);
+      });
+      this.stream.on('connect', () => {
+          if (this.rposClient) this.rposClient.connected();
       });
 
       console.log('PTZ Driver connecting to UDP ' + host + ':' + port);
@@ -340,6 +408,96 @@ class PTZDriver {
   }
 
 
+  // Writes a line to a rposascii controller. cam=N is added when data has a cameraAddress.
+  private rposWrite(command: string, fields: (string | number)[], data: any, keys?: { [key: string]: string | number | undefined }) {
+    if (!this.rposAscii) return;
+    const all: { [key: string]: string | number | undefined } = {};
+    if (data && data.cameraAddress !== undefined) all['cam'] = data.cameraAddress;
+    if (keys) {
+      for (const key of Object.keys(keys)) all[key] = keys[key];
+    }
+    this.rposClient.send(command, fields, all);
+  }
+
+  // Speed for the estimator: the larger of the pan and tilt speed, or 1
+  private speedOf(data: any): number {
+    const speeds = [Number(data.panSpeed), Number(data.tiltSpeed)].filter((v) => isFinite(v) && v > 0);
+    return speeds.length > 0 ? Math.max.apply(null, speeds) : 1;
+  }
+
+  // Field of view in degrees from the controller, or from the config as a fallback
+  getFov(): { h: number, v: number } | null {
+    const caps = this.rposClient ? this.rposClient.caps : null;
+    const h = (caps && caps.hfov) || Number(this.config.PTZHorizontalFOV) || 0;
+    const v = (caps && caps.vfov) || Number(this.config.PTZVerticalFOV) || 0;
+    return (h > 0 && v > 0) ? { h: h, v: v } : null;
+  }
+
+  // Normalised units for the estimator. A translation in FOV units needs the field of view.
+  private toNormalised(value: number, space: string, axis: 'h' | 'v'): number {
+    if (space !== 'fov') return value;
+    const fov = this.getFov();
+    if (!fov) return value;
+    return axis === 'h' ? (value * fov.h) / PAN_SCALE_DEG : (value * fov.v) / TILT_SCALE_DEG;
+  }
+
+  private applyCaps(caps: any) {
+    this.supportsAbsolutePTZ = caps.abs;
+    this.supportsRelativePTZ = caps.rel;
+    this.supportsContinuousPTZ = caps.cont;
+    this.supportsGoToHome = caps.home;
+    this.hasFixedHomePosition = caps.fixedhome;
+    this.hasZoom = caps.zoom;
+    if (caps.presets > 0) this.numPresets = caps.presets;
+    console.log('PTZ Driver - controller capabilities received');
+    this.events.emit('capabilities', caps);
+  }
+
+  // Where ONVIF GetStatus gets its answer
+  statusSource(): 'controller' | 'estimate' | 'none' {
+    if (!this.rposAscii) return 'none';
+    const mode = String(this.config.PTZStatusMode || 'auto').toLowerCase();
+    if (mode === 'off') return 'none';
+    if (mode === 'controller') return 'controller';
+    if (mode === 'estimate') return 'estimate';
+    const caps = this.rposClient.caps;
+    return (caps && caps.movestatus) ? 'controller' : 'estimate';
+  }
+
+  supportsMoveStatus(): boolean {
+    return this.statusSource() !== 'none';
+  }
+
+  // The position is only real when the controller reports it
+  supportsStatusPosition(): boolean {
+    const caps = this.rposClient ? this.rposClient.caps : null;
+    return this.statusSource() === 'controller' && !!(caps && caps.position);
+  }
+
+  // Resolves to the PTZ status, or null when there is nothing to report
+  getStatus(): Promise<PTZStatusInfo | null> {
+    const source = this.statusSource();
+    if (source === 'controller') {
+      return this.rposClient.getStatus().then((status) => {
+        if (!status) return null;
+        const hasPosition = !!(this.rposClient.caps && this.rposClient.caps.position);
+        return <PTZStatusInfo>{
+          pan: hasPosition ? status.pan : undefined,
+          tilt: hasPosition ? status.tilt : undefined,
+          zoom: hasPosition ? status.zoom : undefined,
+          panTilt: status.panTilt,
+          error: status.error,
+          estimated: false
+        };
+      });
+    }
+    if (source === 'estimate') {
+      const status = this.estimator.snapshot();
+      return Promise.resolve(<PTZStatusInfo>{ panTilt: status.panTilt, estimated: true });
+    }
+    return Promise.resolve(null);
+  }
+
 // Data messages have the following format
 //   command
 //   OR
@@ -359,7 +517,8 @@ class PTZDriver {
   process_ptz_command = (command: string, data: any) => {
     if (command==='gotohome') {
       console.log("Goto Home");
-      if (this.rposAscii) this.stream.write(command + '\n');
+      this.rposWrite(command, [], data);
+      if (this.rposAscii) this.estimator.home();
       if (this.pelcod) {
         this.pelcod.setAddress(data.cameraAddress);
         this.pelcod.sendGotoPreset(1); // use preset 1 for Home
@@ -376,7 +535,7 @@ class PTZDriver {
     }
     else if (command==='sethome') {
       console.log("SetHome ");
-      if (this.rposAscii) this.stream.write(command + '\n');
+      this.rposWrite(command, [], data);
       if (this.pelcod) {
         this.pelcod.setAddress(data.cameraAddress);
         this.pelcod.sendSetPreset(1); // use preset 1 for Home
@@ -384,7 +543,7 @@ class PTZDriver {
     }
     else if (command==='gotopreset') {
       console.log("Goto Preset "+ data.name + ' / ' + data.value);
-      if (this.rposAscii) this.stream.write(command + '\t' + data.name + '\t' + data.value + '\n');
+      this.rposWrite(command, [data.name, data.value], data);
       if (this.tenx) this.tenx.fire();
       if (this.pelcod) {
         this.pelcod.setAddress(data.cameraAddress);
@@ -400,7 +559,7 @@ class PTZDriver {
     }
     else if (command==='setpreset') {
       console.log("Set Preset "+ data.name + ' / ' + data.value);
-      if (this.rposAscii) this.stream.write(command + '\t' + data.name + '\t' + data.value + '\n');
+      this.rposWrite(command, [data.name, data.value], data);
       if (this.pelcod) {
         this.pelcod.setAddress(data.cameraAddress);
         this.pelcod.sendSetPreset(parseInt(data.value));
@@ -416,7 +575,7 @@ class PTZDriver {
     }
     else if (command==='clearpreset') {
       console.log("Clear Preset "+ data.name + ' / ' + data.value);
-      if (this.rposAscii) this.stream.write(command + '\t' + data.name + '\t' + data.value + '\n');
+      this.rposWrite(command, [data.name, data.value], data);
       if (this.pelcod) {
         this.pelcod.setAddress(data.cameraAddress);
         this.pelcod.sendClearPreset(parseInt(data.value));
@@ -424,7 +583,7 @@ class PTZDriver {
     }
     else if (command==='aux') {
       console.log("Aux "+ data.name);
-      if (this.rposAscii) this.stream.write(command + '\t' + data.name + '\n');
+      this.rposWrite(command, [data.name], data);
       if (this.pelcod) {
         this.pelcod.setAddress(data.cameraAddress);
         if (data.name === 'AUX1on') this.pelcod.sendSetAux(1);
@@ -447,11 +606,25 @@ class PTZDriver {
     }
     else if (command==='relayactive') {
       console.log("Relay Active "+ data.name);
-      if (this.rposAscii) this.stream.write(command + '\t' + data.name + '\n');
+      this.rposWrite(command, [data.name], data);
     }
     else if (command==='relayinactive') {
       console.log("Relay Inactive "+ data.name);
-      if (this.rposAscii) this.stream.write(command + '\t' + data.name + '\n');
+      this.rposWrite(command, [data.name], data);
+    }
+    else if (command==='stop') {
+      // Stop everything that moves, including a relative or absolute move in progress.
+      // data.zoom is the zoom velocity to keep when only Pan/Tilt is being stopped.
+      console.log("Stop [Cam " + data.cameraAddress + "]");
+      const keepZoom = parseFloat(data.zoom) || 0;
+      if (this.rposAscii && this.rposClient.caps) {
+        // a v2 controller has a stop message
+        this.rposWrite('stop', [], data, { pantilt: 1, zoom: data.stopZoom ? 1 : undefined });
+        this.estimator.stop();
+      } else {
+        // v1 controllers and the other drivers treat a zero velocity as stop
+        this.process_ptz_command('ptz', { pan: 0, tilt: 0, zoom: keepZoom, cameraAddress: data.cameraAddress });
+      }
     }
     else if (command==='ptz') {
       console.log("Continuous PTZ [Cam " + data.cameraAddress + "] " + data.pan + '\t' + data.tilt + '\t' + data.zoom + '\n');
@@ -461,7 +634,10 @@ class PTZDriver {
       try {p = parseFloat(data.pan)} catch (err) {}
       try {t = parseFloat(data.tilt)} catch (err) {}
       try {z = parseFloat(data.zoom)} catch (err) {}
-      if (this.rposAscii) this.stream.write(command + '\t' + p + '\t' + t + '\t' + z + '\n');
+      if (this.rposAscii) {
+        this.rposWrite(command, [p, t, z], data);
+        if (p === 0 && t === 0) this.estimator.stop(); else this.estimator.continuous(p, t);
+      }
       if (this.tenx) {
         if      (p < -0.1 && t >  0.1) this.tenx.upleft();
         else if (p >  0.1 && t >  0.1) this.tenx.upright();
@@ -597,7 +773,10 @@ class PTZDriver {
       try {p = parseFloat(data.pan)} catch (err) {}
       try {t = parseFloat(data.tilt)} catch (err) {}
       try {z = parseFloat(data.zoom)} catch (err) {}
-      if (this.rposAscii) this.stream.write(command + '\t' + p + '\t' + t + '\t' + z + '\n');
+      if (this.rposAscii) {
+        this.rposWrite(command, [p, t, z], data, { panspeed: data.panSpeed, tiltspeed: data.tiltSpeed });
+        this.estimator.absolute(p, t, this.speedOf(data));
+      }
       if (this.panTiltHat) {
           let new_pan_angle = p * 90.0
           this.panTiltHat.pan(Math.round(new_pan_angle));
@@ -614,7 +793,11 @@ class PTZDriver {
       try {p = parseFloat(data.pan)} catch (err) {}
       try {t = parseFloat(data.tilt)} catch (err) {}
       try {z = parseFloat(data.zoom)} catch (err) {}
-      if (this.rposAscii) this.stream.write(command + '\t' + p + '\t' + t + '\t' + z + '\n');
+      if (this.rposAscii) {
+        const space = (data.space === 'fov') ? 'fov' : 'generic';
+        this.rposWrite(command, [p, t, z], data, { space: space, panspeed: data.panSpeed, tiltspeed: data.tiltSpeed });
+        this.estimator.relative(this.toNormalised(p, space, 'h'), this.toNormalised(t, space, 'v'), this.speedOf(data));
+      }
       if (this.panTiltHat) {
           let pan_degrees = p * 90.0
           let new_pan_angle = this.panTiltHat.pan_position - pan_degrees;
@@ -627,12 +810,12 @@ class PTZDriver {
     }
     else if (command==='brightness') {
       console.log("Set Brightness "+ data.value);
-      if (this.rposAscii) this.stream.write(command + '\t' + data.value + '\n');
+      this.rposWrite(command, [data.value], data);
       v4l2ctl.SetBrightness(data.value);
     }
     else if (command==='focus') {
       console.log("Focus "+ data.value);
-      if (this.rposAscii) this.stream.write(command + '\t' + data.value + '\n');
+      this.rposWrite(command, [data.value], data);
       if (this.pelcod) {
         this.pelcod.setAddress(data.cameraAddress);
         if (data.value < 0) this.pelcod.focusNear(true);
@@ -654,7 +837,7 @@ class PTZDriver {
     }
     else if (command==='focusstop') {
       console.log("Focus Stop");
-      if (this.rposAscii) this.stream.write(command + '\n');
+      this.rposWrite(command, [], data);
       if (this.pelcod) {
         this.pelcod.setAddress(data.cameraAddress);
         this.pelcod.focusNear(false);
@@ -670,7 +853,7 @@ class PTZDriver {
     }
     else if (command==='focusmode') {
       console.log("Focus Mode " + data.value);
-      if (this.rposAscii) this.stream.write(command + '\n');
+      this.rposWrite(command, [], data);
       if (this.visca) {
         const valueUpper = data.value.toString().toUpperCase();
         const viscaDestinationByte = 0x80 + (data.cameraAddress & 0x07); // Encodes Sending from Device #0 as a normal (not broadcast) packet. Cammera Address is 3 bits long
