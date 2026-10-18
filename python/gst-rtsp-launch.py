@@ -6,15 +6,14 @@ import argparse
 parser = argparse.ArgumentParser(description="gst-rtsp-launch-py V0.2")
 parser.add_argument('-v', '--verbose', action='store_true', help='Make script chatty')
 parser.add_argument('-f', '--file', action='store', default="v4l2ctl.json", help='Video Configuration file')
-parser.add_argument('-t', '--type', action='store', default="picam", help='libcamera, picam, usbcam, filesrc or testsrc')
-parser.add_argument('-d', '--device', action='store', default="/dev/video0", help='Video Device eg /dev/video0 or File eg /home/pi/testimage.jpg')
+parser.add_argument('-t', '--type', action='store', default="picam", help='picam, usbcam, filesrc or testsrc')
+parser.add_argument('-d', '--device', action='store', default="/dev/video0", help='Video Device eg /dev/video0 or File eg /home/pi/testimage.jpg or Gst Test Src Pattern Name')
 parser.add_argument('-P', '--rtspport', action='store', default=554, help='Set RTSP port')
 parser.add_argument('-u', '--rtspname', action='store', default="live", help='Set RTSP name')
 parser.add_argument('-W', '--rtspresolutionwidth', action='store', default=1280, help='Set RTSP resolution width')
 parser.add_argument('-H', '--rtspresolutionheight', action='store', default=720, help='Set RTSP resolution height')
 parser.add_argument('-M', '--mjpeg', action='store_true', help='Start with MJPEG codec')
 args = parser.parse_args()
-
 
 # --------------------------------------------------------------------------- #
 # configure the service logging
@@ -40,7 +39,16 @@ if args.verbose:
 else:
 	log.setLevel(logging.INFO)
 
-# --------------------------------------------------------------------------- #
+#----------------------------------------
+# Fix default for videotestsrc
+#----------------------------------------
+# the Args Parser has a default for 'device' of '/dev/video0' but for videotestsrc, we want the default to be 'ball'
+if args.type == 'testsrc' and (args.device == '/dev/video0' or args.device == 'auto' or args.device == ''):
+	log.info('Chaning testsrc to ball')
+	args.device = "ball" #new default value
+
+
+# --------------------------------------------------------------------------- # 
 # Use gi to import GStreamer functionality
 # --------------------------------------------------------------------------- #
 import gi
@@ -375,11 +383,80 @@ class StreamServer:
 			log.debug("StreamServer.launch called on running instance.")
 			self.stop() # Need to stop any instances first
 
-		components = self.build_gst_pipeline()
+    		components = self.build_gst_pipeline()
 
-		launch_str = " ! ".join(components)
+	    	launch_str = " ! ".join(components)
 
-		launch_str = f"( {launch_str} )"
+			# valid values are
+			# smpte (0) – SMPTE 100%% color bars
+			# snow (1) – Random (television snow)
+			# black (2) – 100%% Black
+			# white (3) – 100%% White
+			# red (4) – Red
+			# green (5) – Green
+			# blue (6) – Blue
+			# checkers-1 (7) – Checkers 1px
+			# checkers-2 (8) – Checkers 2px
+			# checkers-4 (9) – Checkers 4px
+			# checkers-8 (10) – Checkers 8px
+			# circular (11) – Circular
+			# blink (12) – Blink
+			# smpte75 (13) – SMPTE 75%% color bars
+			# zone-plate (14) – Zone plate
+			# gamut (15) – Gamut checkers
+			# chroma-zone-plate (16) – Chroma zone plate
+			# solid-color (17) – Solid color
+			# ball (18) – Moving ball
+			# smpte100 (19) – SMPTE 100%% color bars
+			# bar (20) – Bar
+			# pinwheel (21) – Pinwheel
+			# spokes (22) – Spokes
+			# gradient (23) – Gradient
+			# colors (24) – Colors
+			# smpte-rp-219 (25) – SMPTE test pattern, RP 219 conformant
+
+			# Ignore most of the parameters
+			log.info("Test camera ignored most of the parameters")
+			log.info("Test pattern is " + self.device);
+			launch_str = '( videotestsrc pattern=' + self.device + ' ! video/x-raw,width='+str(self.width)+',height='+str(self.height)+',framerate='+str(self.fps)+'/1 '
+			launch_str = launch_str + ' ! clockoverlay '
+
+			# Completing the pipe
+			if self.codec == 0:
+				launch_str = launch_str + ' ! x264enc tune=zerolatency ! h264parse ! rtph264pay name=pay0 pt=96 )'
+			elif self.codec == 1:
+				launch_str = launch_str + ' ! jpegenc ! jpegparse ! rtpjpegpay name=pay0 pt=96 )'
+			else:
+				log.error("Illegal codec")
+
+		elif self.type == "filesrc":
+			# Generate a black test image and overlay a jpeg (scaling to fit the image). Encoded to H264 using libx264.
+                        # On a Pi this could have passed the raw image to the GPU (omxh264enc)
+                        # I did try the videomixer/compositor and a filesrc plus imagefreeze but the only thing I could get working real-time was gdkpixbuffer
+
+			# Ignore most of the parameters
+			log.info("Test camera ignored most of the parameters")
+
+			launch_str = '( videotestsrc pattern=black is-live=true ! video/x-raw,width='+str(self.width)+',height='+str(self.height)+',framerate='+str(self.fps)+'/1 '
+			launch_str = launch_str + ' ! gdkpixbufoverlay location="' + self.device + '" overlay-width=' + str(self.width) + ' overlay-height=' + str(self.height) + ' '
+			launch_str = launch_str + ' ! clockoverlay '
+
+			# Completing the pipe
+			if self.codec == 0:
+				launch_str = launch_str + ' ! queue ! x264enc tune=zerolatency ! h264parse ! rtph264pay name=pay0 pt=96 '
+			elif self.codec == 1:
+				launch_str = launch_str + ' ! jpegenc ! jpegparse ! rtpjpegpay name=pay0 pt=96 '
+			else:
+				log.error("Illegal codec")
+			launch_str = launch_str + ' )'
+
+		else: # usbcam USB Camera
+			# Ignore most of the parameters
+			log.info("USB camera ignored most of the parameters")
+			launch_str = '( v4l2src is-live=true device='+self.device+' brightness='+str(self.brightness)+' contrast='+str(self.contrast)+' saturation='+str(self.saturation)
+			launch_str = launch_str + ' ! queue ! jpegdec ! clockoverlay ! queue ! x264enc tune=zerolatency ! h264parse ! rtph264pay name=pay0 pt=96 )'
+
+			# TODO .... allow MJPEG output codec
 
 		log.debug(launch_str)
 		cam_mutex.acquire()

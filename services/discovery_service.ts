@@ -90,7 +90,22 @@ class DiscoveryService {
           probe_type = ""; // For a VMS that does not send Types
         }
 
-        if (probe_type === "" || probe_type.indexOf("NetworkVideoTransmitter") > -1) {
+        const probe_types = probe_type ? probe_type.split(/\s+/) : [];
+        const normalized_types = probe_types.map(t => t.includes(":") ? t.split(":")[1] : t);
+        const matchesProbe =
+          probe_types.length === 0 ||
+          normalized_types.indexOf("NetworkVideoTransmitter") > -1 ||
+          normalized_types.indexOf("Device") > -1;
+
+        if (matchesProbe) {
+          const scopeslist = [
+            `onvif://www.onvif.org/type/video_encoder`,
+            `onvif://www.onvif.org/type/ptz`,
+            `onvif://www.onvif.org/hardware/${encodeURIComponent(this.config.DeviceInformation.Model)}`,
+            `onvif://www.onvif.org/name/${encodeURIComponent(this.config.DeviceInformation.Manufacturer + ' ' + this.config.DeviceInformation.Model)}`,
+            `onvif://www.onvif.org/location/unspecified`
+          ];
+          const scopes = scopeslist.join(' ');
 
           let reply = `<?xml version="1.0" encoding="UTF-8"?>
           <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery" xmlns:dn="http://www.onvif.org/ver10/network/wsdl">
@@ -108,21 +123,15 @@ class DiscoveryService {
                     <wsa:Address>urn:uuid:${utils.uuid5(utils.getIpAddress() + this.config.ServicePort + this.config.RTSPPort)}</wsa:Address>
                   </wsa:EndpointReference>
                   <d:Types>dn:NetworkVideoTransmitter</d:Types>
-                  <d:Scopes>
-                    onvif://www.onvif.org/type/video_encoder
-                    onvif://www.onvif.org/type/ptz
-                    onvif://www.onvif.org/hardware/${encodeURIComponent(this.config.DeviceInformation.Model)}
-                    onvif://www.onvif.org/name/${encodeURIComponent(this.config.DeviceInformation.Manufacturer + ' ' + this.config.DeviceInformation.Model)}
-                    onvif://www.onvif.org/location/
-                  </d:Scopes>
+                  <d:Scopes>${scopes}</d:Scopes>
                   <d:XAddrs>http://${utils.getIpAddress()}:${this.config.ServicePort}/onvif/device_service</d:XAddrs>
                   <d:MetadataVersion>1</d:MetadataVersion>
-              </d:ProbeMatch>
+                </d:ProbeMatch>
               </d:ProbeMatches>
             </SOAP-ENV:Body>
           </SOAP-ENV:Envelope>`;
 
-          let reply_bytes = new Buffer(reply);
+          let reply_bytes = Buffer.from(reply);
 
           // Mac needed replies from a different UDP socket (ie not the bounded socket)
           return reply_socket.send(reply_bytes, 0, reply_bytes.length, rinfo.port, rinfo.address);
@@ -131,7 +140,15 @@ class DiscoveryService {
     });
 
     discover_socket.bind(3702, () => {
-      return discover_socket.addMembership('239.255.255.250', utils.getIpAddress());
+      const interfaceAddress = utils.getIpAddress();
+      try {
+        discover_socket.addMembership('239.255.255.250', interfaceAddress);
+      } catch (err: any) {
+        // If the requested interface is not available (eg. ENODEV), fall back to the
+        // default interface instead of crashing.
+        utils.log.warn(`Failed to join multicast group on ${interfaceAddress}: ${err?.message || err}`);
+        discover_socket.addMembership('239.255.255.250');
+      }
     });
 
     utils.log.info("discovery_service started");

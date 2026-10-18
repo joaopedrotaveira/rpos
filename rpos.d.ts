@@ -5,6 +5,8 @@ interface rposConfig {
   ServicePort: number;
   Username: string;
   Password: string;
+  Cameras: CameraSettings[];
+  CameraName: string;
   CameraType: string;
   CameraDevice: string;
   RTSPAddress: string;
@@ -21,9 +23,25 @@ interface rposConfig {
   PTZSerialPortSettings: PTZSerialPortSettings;
   PTZOutputURL: string;
   PTZCameraAddress: number;
+  PTZNumPresets: number;
   DeviceInformation: DeviceInformation;
   logLevel: number;
   logSoapCalls: Boolean;
+}
+
+interface CameraSettings {
+  CameraName: string;
+  CameraType: string;
+  CameraDevice: string;
+  RTSPAddress: string;
+  RTSPPort: number;
+  RTSPName: string;
+  RTSPServer: number;
+  MulticastEnabled: boolean;
+  RTSPMulticastName: string;
+  MulticastAddress: string;
+  MulticastPort: number;
+  PTZCameraAddress: number; // There is currently one global PTZ output. This defines the camera number
 }
 
 interface PTZSerialPortSettings {
@@ -94,3 +112,67 @@ interface CameraSettingsBase {
   resolution: Resolution;
   framerate: number;
 }
+
+type VideoSource = {
+  attributes: {
+    token: string
+  },
+  Framerate: number,
+  Resolution: {
+    Width: number,
+    Height: number
+  }
+}
+
+type VideoSourceConfiguration = {
+  Name: string
+  attributes: {
+    token: string
+  },
+  UseCount: number,
+  SourceToken: string,
+  Bounds: {
+    attributes: {
+      x: number,
+      y: number,
+      width: number,
+      height: number
+    }
+  }
+}
+
+type SavedProfile = {
+  name: string,
+  token: string,
+  videoSourceConfigurationToken: string,
+  videoEncoderConfigurationToken: string,
+  ptzConfigurationToken: string
+}
+
+type Profile = {
+  Name: string
+  attributes: {
+    token: string,
+    fixed: boolean
+  },
+  VideoSourceConfiguration?: VideoSourceConfiguration,
+  VideoEncoderConfiguration?: any,
+  PTZConfiguration?: any
+};
+
+type PresetArrayItem = {
+  ptzNodeToken: string,
+  presetName: string,
+  presetToken: string,
+  used: boolean,
+  fixed: boolean
+};
+
+type ImagingArrayItem = {
+  videoSourceToken: string,
+  brightness: number,
+  autoFocusMode: string,
+  focusDefaultSpeed: number,
+  focusNearLimit: number,
+  focusFarLimit: number
+};

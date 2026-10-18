@@ -3,6 +3,7 @@
 import { Stream } from "stream";
 import { v4l2ctl } from "./v4l2ctl";
 import net = require('net');
+import dgram = require('dgram');
 import { setImmediate } from "timers";
 import events = require("events");
 
@@ -91,6 +92,10 @@ PTZOutput
     PTZOutput: "tcp"
     PTZOutputURL: "127.0.0.1:9999"
 
+  Example 3
+    UDP output, to a hostname and port
+    PTZOutput: "udp"
+    PTZOutputURL: "127.0.0.1:9999"
 
 ONVIF Imaging Service
   For Imaging Service commands (eg Brightness), commands are sent through to the V4L2 interface
@@ -122,6 +127,7 @@ class ReconnectingStream extends events.EventEmitter {
     })
     this.stream.on('data', (data) => {  
         console.log('PTZ Driver received socket data ' + data);
+        // TODO - emit the data
     });
     this.stream.on('close', () => {
       console.log('PTZ Driver - Socket closed');
@@ -152,6 +158,55 @@ class ReconnectingStream extends events.EventEmitter {
     }
   }
 }
+
+
+class UDPStream extends events.EventEmitter {
+  hostname: string;
+  port: number|string;
+  socket: any = null; // the currently open network socket
+
+  constructor() {
+    super();
+  }
+
+  connect(hostname: string, port: number|string) {
+    this.hostname = hostname;
+    this.port = port;
+
+    this.socket = dgram.createSocket('udp4');
+    
+    this.socket.on('listening', function() {
+      console.log('PTZ Driver - UDP Socket ready');
+    })
+    this.socket.on('message', (data) => {  
+        console.log('PTZ Driver received socket data ' + data);
+        // TODO - emit the message
+    });
+    this.socket.on('close', () => {
+      console.log('PTZ Driver - UDP Socket closed');
+    });
+    this.socket.on('error', () => {
+      console.log('PTZ Driver - UDP Socket error');
+    });
+
+    console.log('PTZ Driver connecting to ' + this.hostname + ':' + this.port);
+
+    // Note - we could do a .connect() here that will bind this UDP socket to a hostname and port, which simplifies the .send() command
+    // we get a "connected" event when the UDP socket is ready
+
+    this.socket.bind(0); // let the OS pick the lock source port
+  }
+
+
+  write(data: string|Buffer) {
+    // pass the Write through to the socket. If the socket is null, we throw away the data
+    try {
+      this.socket.send(data, this.port, this.hostname);
+    } catch (err) {
+      console.log('PTZ Driver - UDP Data thrown away')
+    }
+  }
+}
 class PTZDriver {
 
   config: rposConfig;
@@ -167,8 +222,12 @@ class PTZDriver {
   supportsContinuousPTZ: boolean = false;
   supportsGoToHome: boolean = false;
   hasFixedHomePosition: boolean = true;
+  numPresets: number = 255;
 
   constructor(config: rposConfig) {
+
+    // RPOS from mid 2022 supports multiple cameras and multiple PTZ addreses
+    // so a new cameraAddress parameter is passed in the 'data' object
     this.config = config;
     let parent = this;
 
@@ -186,22 +245,24 @@ class PTZDriver {
 
     // Open the OUTPUT STREAM
     if (PTZOutput === 'serial') {
-      var SerialPort = require('serialport');
-      this.serialPort = new SerialPort(config.PTZSerialPort, 
-        {
+      const { SerialPort } = require('serialport');
+      this.serialPort = new SerialPort({
+        path: config.PTZSerialPort,
         baudRate: config.PTZSerialPortSettings.baudRate,
         parity:   config.PTZSerialPortSettings.parity,
         dataBits: config.PTZSerialPortSettings.dataBits,
         stopBits: config.PTZSerialPortSettings.stopBits,
-        }
-      );
- 
-      this.stream = this.serialPort.on("open", function(err){
-          if (err) {
-            console.log('Error: '+err);
-            return;
-          }
       });
+
+      this.serialPort.on("open", function(){
+          console.log('Serial port opened');
+      });
+
+      this.serialPort.on("error", function(err: Error){
+          console.log('Error: '+err);
+      });
+
+      this.stream = this.serialPort;
     }
 
     if (PTZOutput === 'tcp') {
@@ -218,6 +279,19 @@ class PTZDriver {
       this.stream.connect(host, port);
     }
 
+    if (PTZOutput === 'udp') {
+      let host = config.PTZOutputURL.split(':')[0];
+      let port = config.PTZOutputURL.split(':')[1];      
+
+      this.stream = new UDPStream();
+      this.stream.on('message', function(data) {  // USES MESSAGE (tcp uses 'data')
+          console.log('PTZ Driver received UDP socket data ' + data);
+      });
+
+      console.log('PTZ Driver connecting to UDP ' + host + ':' + port);
+
+      this.stream.connect(host, port);
+    }
 
     // Initialise specific drivers, map them onto a STREAM
 
@@ -252,12 +326,16 @@ class PTZDriver {
       this.supportsContinuousPTZ = true;
       this.supportsGoToHome = true;
       this.hasFixedHomePosition = false;
+      // numPrests - use default
     }
 
     if (config.PTZDriver === 'visca') {
       this.visca = true;
       this.supportsContinuousPTZ = true;
       this.supportsGoToHome = true;
+      this.hasFixedHomePosition = true; // cannot see a way to set the Home Position in VISCA, only Goto Home available.
+      this.numPresets = 6; // Old EVI-D70 has 6 presets. New models have 64 presets
+      if ('PTZNumPresets' in config) this.numPresets = Number(config.PTZNumPresets)
     }
   }
 
@@ -282,11 +360,15 @@ class PTZDriver {
     if (command==='gotohome') {
       console.log("Goto Home");
       if (this.rposAscii) this.stream.write(command + '\n');
-      if (this.pelcod) this.pelcod.sendGotoPreset(1); // use preset 1 for Home
+      if (this.pelcod) {
+        this.pelcod.setAddress(data.cameraAddress);
+        this.pelcod.sendGotoPreset(1); // use preset 1 for Home
+      }
       if (this.visca) {
-        let data: number[] = [];
-        data.push(0x81,0x01,0x06,0x04,0xff);
-        this.stream.write(new Buffer(data));
+        const viscaDestinationByte = 0x80 + (data.cameraAddress & 0x07); // Encodes Sending from Device #0 as a normal (not broadcast) packet. Cammera Address is 3 bits long
+        let viscaData: number[] = [];
+        viscaData.push(viscaDestinationByte,0x01,0x06,0x04,0xff);
+        this.stream.write(Buffer.from(viscaData));
       }
       if (this.panTiltHat) {
         this.panTiltHat.goto_home();
@@ -295,28 +377,56 @@ class PTZDriver {
     else if (command==='sethome') {
       console.log("SetHome ");
       if (this.rposAscii) this.stream.write(command + '\n');
-      if (this.pelcod) this.pelcod.sendSetPreset(1); // use preset 1 for Home
+      if (this.pelcod) {
+        this.pelcod.setAddress(data.cameraAddress);
+        this.pelcod.sendSetPreset(1); // use preset 1 for Home
+      }
     }
     else if (command==='gotopreset') {
       console.log("Goto Preset "+ data.name + ' / ' + data.value);
       if (this.rposAscii) this.stream.write(command + '\t' + data.name + '\t' + data.value + '\n');
       if (this.tenx) this.tenx.fire();
-      if (this.pelcod) this.pelcod.sendGotoPreset(parseInt(data.value));
+      if (this.pelcod) {
+        this.pelcod.setAddress(data.cameraAddress);
+        this.pelcod.sendGotoPreset(parseInt(data.value));
+      }
+      if (this.visca) {
+        const viscaDestinationByte = 0x80 + (data.cameraAddress & 0x07); // Encodes Sending from Device #0 as a normal (not broadcast) packet. Cammera Address is 3 bits long
+        const viscaPresetNumber = parseInt(data.value) - 1; // values start at 0
+        let viscaData: number[] = [];
+        viscaData.push(viscaDestinationByte,0x01,0x04,0x3f,0x02,viscaPresetNumber, 0xff);
+        this.stream.write(Buffer.from(viscaData));
+      }
     }
     else if (command==='setpreset') {
       console.log("Set Preset "+ data.name + ' / ' + data.value);
       if (this.rposAscii) this.stream.write(command + '\t' + data.name + '\t' + data.value + '\n');
-      if (this.pelcod) this.pelcod.sendSetPreset(parseInt(data.value));
+      if (this.pelcod) {
+        this.pelcod.setAddress(data.cameraAddress);
+        this.pelcod.sendSetPreset(parseInt(data.value));
+      }
+      if (this.visca) {
+        const viscaDestinationByte = 0x80 + (data.cameraAddress & 0x07); // Encodes Sending from Device #0 as a normal (not broadcast) packet. Cammera Address is 3 bits long
+        const viscaPresetNumber = parseInt(data.value) - 1; // values start at 0 for visca
+        let viscaData: number[] = [];
+        viscaData.push(viscaDestinationByte,0x01,0x04,0x3f,0x01,viscaPresetNumber, 0xff);
+        this.stream.write(Buffer.from(viscaData));
+      }
+
     }
     else if (command==='clearpreset') {
       console.log("Clear Preset "+ data.name + ' / ' + data.value);
       if (this.rposAscii) this.stream.write(command + '\t' + data.name + '\t' + data.value + '\n');
-      if (this.pelcod) this.pelcod.sendClearPreset(parseInt(data.value));
+      if (this.pelcod) {
+        this.pelcod.setAddress(data.cameraAddress);
+        this.pelcod.sendClearPreset(parseInt(data.value));
+      }
     }
     else if (command==='aux') {
       console.log("Aux "+ data.name);
       if (this.rposAscii) this.stream.write(command + '\t' + data.name + '\n');
       if (this.pelcod) {
+        this.pelcod.setAddress(data.cameraAddress);
         if (data.name === 'AUX1on') this.pelcod.sendSetAux(1);
         if (data.name === 'AUX1off') this.pelcod.sendClearAux(1);
         if (data.name === 'AUX2on') this.pelcod.sendSetAux(2);
@@ -344,7 +454,7 @@ class PTZDriver {
       if (this.rposAscii) this.stream.write(command + '\t' + data.name + '\n');
     }
     else if (command==='ptz') {
-      console.log("Continuous PTZ "+ data.pan + '\t' + data.tilt + '\t' + data.zoom + '\n');
+      console.log("Continuous PTZ [Cam " + data.cameraAddress + "] " + data.pan + '\t' + data.tilt + '\t' + data.zoom + '\n');
       var p=0.0;
       var t=0.0;
       var z=0.0;
@@ -364,6 +474,7 @@ class PTZDriver {
         else this.tenx.stop();
       }
       if (this.pelcod) {
+        this.pelcod.setAddress(data.cameraAddress);
         this.pelcod.up(false).down(false).left(false).right(false);
         if      (p < 0 && t > 0) this.pelcod.up(true).left(true);
         else if (p > 0 && t > 0) this.pelcod.up(true).right(true);
@@ -414,47 +525,49 @@ class PTZDriver {
         if (visca_pan_speed === 0) visca_pan_speed = 1;
         if (visca_tilt_speed === 0) visca_tilt_speed = 1;
 
+        const viscaDestinationByte = 0x80 + (data.cameraAddress & 0x07) // Encodes Sending from Device #0 as a normal (not broadcast) packet. Cammera Address is 3 bits long
+
         if (this.config.PTZDriver === 'visca') {
-          let data: number[] = [];
+          let viscaData: number[] = [];
           if      (p < 0 && t > 0) { // upleft
-            data.push(0x81,0x01,0x06,0x01,visca_pan_speed,visca_zoom_speed,0x01,0x01,0xff);
+            viscaData.push(viscaDestinationByte,0x01,0x06,0x01,visca_pan_speed,visca_zoom_speed,0x01,0x01,0xff);
           }
           else if (p > 0 && t > 0) { // upright
-            data.push(0x81,0x01,0x06,0x01,visca_pan_speed,visca_zoom_speed,0x02,0x01,0xff);
+            viscaData.push(viscaDestinationByte,0x01,0x06,0x01,visca_pan_speed,visca_zoom_speed,0x02,0x01,0xff);
           }
           else if (p < 0 && t < 0) { // downleft;
-            data.push(0x81,0x01,0x06,0x01,visca_pan_speed,visca_zoom_speed,0x01,0x02,0xff);
+            viscaData.push(viscaDestinationByte,0x01,0x06,0x01,visca_pan_speed,visca_zoom_speed,0x01,0x02,0xff);
           }
           else if (p >  0 && t < 0) { // downright;
-            data.push(0x81,0x01,0x06,0x01,visca_pan_speed,visca_zoom_speed,0x02,0x02,0xff);
+            viscaData.push(viscaDestinationByte,0x01,0x06,0x01,visca_pan_speed,visca_zoom_speed,0x02,0x02,0xff);
           }
           else if (p > 0) { // right
-            data.push(0x81,0x01,0x06,0x01,visca_pan_speed,0x00,0x02,0x03,0xff);
+            viscaData.push(viscaDestinationByte,0x01,0x06,0x01,visca_pan_speed,0x00,0x02,0x03,0xff);
           }
           else if (p < 0) { // left
-            data.push(0x81,0x01,0x06,0x01,visca_pan_speed,0x00,0x01,0x03,0xff);
+            viscaData.push(viscaDestinationByte,0x01,0x06,0x01,visca_pan_speed,0x00,0x01,0x03,0xff);
           }
           else if (t > 0) { // up
-            data.push(0x81,0x01,0x06,0x01,0x00,visca_tilt_speed,0x03,0x01,0xff);
+            viscaData.push(viscaDestinationByte,0x01,0x06,0x01,0x00,visca_tilt_speed,0x03,0x01,0xff);
           }
           else if (t < 0) { // down
-            data.push(0x81,0x01,0x06,0x01,0x00,visca_tilt_speed,0x03,0x02,0xff);
+            viscaData.push(viscaDestinationByte,0x01,0x06,0x01,0x00,visca_tilt_speed,0x03,0x02,0xff);
           }
           else { // stop 
-            data.push(0x81,0x01,0x06,0x01,0x00,0x00,0x03,0x03,0xff);
+            viscaData.push(viscaDestinationByte,0x01,0x06,0x01,0x00,0x00,0x03,0x03,0xff);
           }
 
           // Zoom
           if (z < 0) { // zoom out
-            data.push(0x81,0x01,0x04,0x07,(0x30 + visca_zoom_speed),0xff);
+            viscaData.push(viscaDestinationByte,0x01,0x04,0x07,(0x30 + visca_zoom_speed),0xff);
           }
           else if (z > 0) { // zoom in
-            data.push(0x81,0x01,0x04,0x07,(0x20 + visca_zoom_speed),0xff);
+            viscaData.push(viscaDestinationByte,0x01,0x04,0x07,(0x20 + visca_zoom_speed),0xff);
           } else { // zoom stop
-            data.push(0x81,0x01,0x04,0x07,0x00,0xff);
+            viscaData.push(viscaDestinationByte,0x01,0x04,0x07,0x00,0xff);
           }
 
-          this.stream.write(new Buffer(data));
+          this.stream.write(Buffer.from(viscaData));
         }
       }
       if (this.panTiltHat) {
@@ -521,6 +634,7 @@ class PTZDriver {
       console.log("Focus "+ data.value);
       if (this.rposAscii) this.stream.write(command + '\t' + data.value + '\n');
       if (this.pelcod) {
+        this.pelcod.setAddress(data.cameraAddress);
         if (data.value < 0) this.pelcod.focusNear(true);
         else if (data.value > 0) this.pelcod.focusFar(true);
         else {
@@ -529,18 +643,51 @@ class PTZDriver {
         }
         this.pelcod.send();
       }
+      if (this.visca) {
+        const viscaDestinationByte = 0x80 + (data.cameraAddress & 0x07); // Encodes Sending from Device #0 as a normal (not broadcast) packet. Cammera Address is 3 bits long
+        let viscaData: number[] = [];
+        if (data.value < 0) viscaData.push(viscaDestinationByte,0x01,0x04,0x08,0x03,0xff); // focus Near
+        else if (data.value > 0) viscaData.push(viscaDestinationByte,0x01,0x04,0x08,0x02,0xff); // focus Far
+        else viscaData.push(viscaDestinationByte,0x01,0x04,0x08,0x00,0xff); // stop
+        this.stream.write(Buffer.from(viscaData));
+      }
     }
     else if (command==='focusstop') {
       console.log("Focus Stop");
       if (this.rposAscii) this.stream.write(command + '\n');
       if (this.pelcod) {
+        this.pelcod.setAddress(data.cameraAddress);
         this.pelcod.focusNear(false);
         this.pelcod.focusFar(false);
         this.pelcod.send();
       }
+      if (this.visca) {
+        const viscaDestinationByte = 0x80 + (data.cameraAddress & 0x07); // Encodes Sending from Device #0 as a normal (not broadcast) packet. Cammera Address is 3 bits long
+        let viscaData: number[] = [];
+        viscaData.push(viscaDestinationByte,0x01,0x04,0x08,0x00,0xff);
+        this.stream.write(Buffer.from(viscaData));
+      }
+    }
+    else if (command==='focusmode') {
+      console.log("Focus Mode " + data.value);
+      if (this.rposAscii) this.stream.write(command + '\n');
+      if (this.visca) {
+        const valueUpper = data.value.toString().toUpperCase();
+        const viscaDestinationByte = 0x80 + (data.cameraAddress & 0x07); // Encodes Sending from Device #0 as a normal (not broadcast) packet. Cammera Address is 3 bits long
+        let viscaData: number[] = [];
+        if (valueUpper == "AUTO") {
+          viscaData.push(viscaDestinationByte,0x01,0x04,0x38,0x02,0xff);
+        }
+        if (valueUpper == "MANUAL") {
+          viscaData.push(viscaDestinationByte,0x01,0x04,0x38,0x03,0xff);
+        }
+
+        // Note there is also a VISCA Command to toggle between Auto and Manual 8x 01 04 38 10 FF
+        this.stream.write(Buffer.from(viscaData));
+      }
     }
     else {
-      if (!data.value) {
+      if ('value' in data == false) {
         console.log("Unhandled PTZ/Imaging Command Received: " + command);
       } else {
         console.log("Unhandled PTZ/Imaging Command Received: " + command + ' Value:' + data.value);

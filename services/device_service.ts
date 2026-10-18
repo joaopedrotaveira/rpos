@@ -90,42 +90,65 @@ class DeviceService extends SoapService {
     };
 
     port.GetServices = (args /*, cb, headers*/) => {
-      // ToDo. Check value of args.IncludeCapability
+      // ToDo. Check value of args.IncludeCapability.
+      // Should only include Capanilities if requested. We always return them.
 
       var GetServicesResponse = {
-        Service : [
-        {
-          Namespace : "http://www.onvif.org/ver10/device/wsdl",
-          XAddr : `http://${utils.getIpAddress() }:${this.config.ServicePort}/onvif/device_service`,
-          Version : { 
-            Major : 2,
-            Minor : 5,
-          }
-        },
-        { 
-          Namespace : "http://www.onvif.org/ver20/imaging/wsdl",
-          XAddr : `http://${utils.getIpAddress() }:${this.config.ServicePort}/onvif/imaging_service`,
-          Version : { 
-            Major : 2,
-            Minor : 5,
-          }
-        },
-        { 
-          Namespace : "http://www.onvif.org/ver10/media/wsdl",
-          XAddr : `http://${utils.getIpAddress() }:${this.config.ServicePort}/onvif/media_service`,
-          Version : { 
-            Major : 2,
-            Minor : 5,
-          }
-        },
-        { 
-          Namespace : "http://www.onvif.org/ver20/ptz/wsdl",
-          XAddr : `http://${utils.getIpAddress() }:${this.config.ServicePort}/onvif/ptz_service`,
-          Version : { 
-            Major : 2,
-            Minor : 5,
+        Service: [
+          {
+            Namespace: "http://www.onvif.org/ver10/device/wsdl",
+            XAddr: `http://${utils.getIpAddress()}:${this.config.ServicePort}/onvif/device_service`,
+            Version: {
+              Major: 2,
+              Minor: 5,
+            },
+            Capabilities: { Capabilities: {} } // nested Capabilities is already in the tds: namespace
           },
-        }]
+          {
+            Namespace: "http://www.onvif.org/ver20/imaging/wsdl",
+            XAddr: `http://${utils.getIpAddress()}:${this.config.ServicePort}/onvif/imaging_service`,
+            Version: {
+              Major: 2,
+              Minor: 5,
+            },
+            Capabilities: {
+              "timg:Capabilities": { // Uses Node-Soap Override Namespace feature
+                attributes: { // Add namespace here. Really wanted to put it in Envelope but this is also valid
+                  'xmlns:timg': 'http://www.onvif.org/ver20/imaging/wsdl',
+                },
+              }
+            }
+          },
+          {
+            Namespace: "http://www.onvif.org/ver10/media/wsdl",
+            XAddr: `http://${utils.getIpAddress()}:${this.config.ServicePort}/onvif/media_service`,
+            Version: {
+              Major: 2,
+              Minor: 5,
+            },
+            Capabilities: {
+              "trt:Capabilities": {
+                attributes: { // Uses Node-Soap Override Namespace feature
+                  'xmlns:trt': 'http://www.onvif.org/ver10/media/wsdl',
+                },
+              }
+            }
+          },
+          {
+            Namespace: "http://www.onvif.org/ver20/ptz/wsdl",
+            XAddr: `http://${utils.getIpAddress()}:${this.config.ServicePort}/onvif/ptz_service`,
+            Version: {
+              Major: 2,
+              Minor: 5,
+            },
+            Capabilities: {
+              "tptz:Capabilities": { // Uses Node-Soap Override Namespace feature
+                attributes: { // Add namespace here. Really wanted to put it in Envelope but this is be valid
+                  'xmlns:tptz': 'http://www.onvif.org/ver20/ptz/wsdl',
+                },
+              }
+            }
+          }]
       };
 
       return GetServicesResponse;
@@ -260,6 +283,17 @@ class DeviceService extends SoapService {
       return SetHostnameFromDHCPResponse;
     };
 
+    port.GetDNS = (args /*, cb, headers*/) => {
+      var GetDNSResponse = { 
+        DNSInformation : { 
+          FromDHCP : true,
+          Extension : { }
+        }
+      
+      };
+      return GetDNSResponse;
+    };
+
     port.GetScopes = (args) => {
       var GetScopesResponse = { Scopes: [] };
       GetScopesResponse.Scopes.push({
@@ -280,6 +314,14 @@ class DeviceService extends SoapService {
       return GetScopesResponse;
     };
 
+
+    port.GetDiscoveryMode = (args /*, cb, headers*/) => {
+      var GetDiscoveryModeResponse = { 
+        DiscoveryMode : true
+      };
+      return GetDiscoveryModeResponse;
+    };
+    
     port.GetServiceCapabilities = (args /*, cb, headers*/) => {
       var GetServiceCapabilitiesResponse = {
         Capabilities: {
@@ -344,9 +386,28 @@ class DeviceService extends SoapService {
     };
 
     port.GetNTP = (args /*, cb, headers*/) => {
-      var GetNTPResponse = {};
-      return GetNTPResponse;
-    };
+       var GetNTPResponse = { 
+          NTPInformation : { 
+            FromDHCP : false,
+            //NTPFromDHCP : [{ 
+            //  Type : { xs:string},
+            //  IPv4Address : { xs:token},
+            //  IPv6Address : { xs:token},
+            //  DNSname : { xs:token},
+            //  Extension : { }
+            //}],
+            NTPManual : [{ 
+              Type : "DNS",
+              //IPv4Address : { xs:token},
+              //IPv6Address : { xs:token},
+              DNSname : "pool.ntp.org",
+              Extension : { }
+            }],
+            Extension : { }
+           } 
+        };
+        return GetNTPResponse;
+      };
 
     port.SetNTP = (args /*, cb, headers*/) => {
       var SetNTPResponse = {};
@@ -401,6 +462,27 @@ class DeviceService extends SoapService {
         }]
       };
       return GetNetworkProtocolsResponse;
+    };
+
+    port.GetNetworkDefaultGateway = (args /*, cb, headers*/) => {
+      let GetNetworkDefaultGatewayResponse = {}
+        if (utils.isLinux) {
+        // Linux method for now. Need to include Windows and Mac
+        const spawn = require('child_process').spawnSync;
+
+        const child = spawn('bash', ['-c', 'ip route']).stdout.toString();
+        const gateway = child.match(/default via (.*?)\s/)[1]; // Look for text "default via " and then get everything up to the next Space or Tab
+        GetNetworkDefaultGatewayResponse = { 
+          NetworkGateway : { 
+            IPv4Address : [gateway], // FIXME. Need to ask the OS for this information
+          //IPv6Address : [{ xs:token}]
+          }
+        };
+      } else {
+        // TODO
+        // return empty result
+      }
+      return GetNetworkDefaultGatewayResponse;
     };
 
     port.GetRelayOutputs = (args /*, cb, headers*/) => {
