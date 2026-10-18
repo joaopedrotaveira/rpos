@@ -84,7 +84,7 @@ class PTZService extends SoapService {
     }
     if (this.ptz_driver.supportsRelativePTZ) {
       node.SupportedPTZSpaces['RelativePanTiltTranslationSpace'] = [{
-          URI : 'http://www.onvif.org/ver10/tptz/PanTiltSpaces/TranslationGenericSpace',
+          URI : 'http://www.onvif.org/ver10/tptz/PanTiltSpaces/TranslationSpaceFov',
           XRange : { 
             Min : -1.0,
             Max : 1.0

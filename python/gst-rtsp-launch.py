@@ -305,11 +305,12 @@ class StreamServer:
 			log.info("USB camera ignored most of the parameters")
 			components.append('v4l2src is-live=true device='+self.device+' brightness='+str(self.brightness)+' contrast='+str(self.contrast)+' saturation='+str(self.saturation))
 
-			components.append('image/jpeg, framerate='+str(self.fps)+'/1, width='+str(self.width)+', height='+str(self.height))
+			#components.append('image/jpeg, framerate='+str(self.fps)+'/1, width='+str(self.width)+', height='+str(self.height))
+			components.append('video/x-raw,width='+str(self.width)+',height='+str(self.height)+',framerate='+str(self.fps)+'/1')
 
 			if self.codec == 0:
-				components.append('queue')
-				components.append('jpegdec')
+				#components.append('queue')
+				#components.append('jpegdec')
 				components.append('queue')
 				components.append('x264enc tune=zerolatency')
 			elif self.codec == 1:
@@ -435,8 +436,8 @@ class StreamServer:
 
 if __name__ == '__main__':
 	codec = 0 		# Default to H264
-	if args.mjpeg:
-		codec = 1
+	#if args.mjpeg:
+	#	codec = 1
 	streamServer = StreamServer(args.type, args.device, args.file, args.rtspport, args.rtspname, \
 								args.rtspresolutionwidth, args.rtspresolutionheight,\
 								codec)
