@@ -9,5 +9,12 @@
 | [ptz-bug-fix-plan.md](ptz-bug-fix-plan.md) | looking at the PTZ bugs that were found, and which are fixed |
 
 `firmware/` has the tested sample code for the firmware: a line parser
-(`rposascii_parse.h`, with `parser_test.cpp`) and a command-line probe
-(`probe.py`) to talk to a controller by serial or TCP.
+(`rposascii_parse.h`, with `parser_test.cpp`), a command-line probe (`probe.py`) to
+send lines to a controller by serial or TCP, and an interactive console with a
+self-test (`ptz_console.py`):
+
+```
+python3 docs/firmware/ptz_console.py /dev/ttyUSB0            # keys: arrows, c, g, p, space, ? ...
+python3 docs/firmware/ptz_console.py /dev/ttyUSB0 --demo     # self-test, moves the camera
+python3 docs/firmware/ptz_console.py /dev/ttyUSB0 --baud 9600   # if the firmware does not use 115200
+```

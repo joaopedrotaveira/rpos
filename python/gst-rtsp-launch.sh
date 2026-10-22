@@ -6,7 +6,8 @@ echo $@
 
 camera-streamer --camera-type=libcamera \
 	--camera-nbufs=3 \
-	--camera-fps=25 --camera-stream.disabled=0--camera-video.disabled=0 \
+	--camera-fps=25 --camera-stream.disabled=0 --camera-video.disabled=0 \
+	--camera-options=AfMode=2 \
 	--http-listen=0.0.0.0 \
 	--http-port=8082 \
 	--http-maxcons=10 \
